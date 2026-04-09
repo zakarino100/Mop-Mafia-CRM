@@ -1,12 +1,75 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertLeadSchema, insertCustomerSchema, insertJobSchema, admins } from "@shared/schema";
+import { insertLeadSchema, insertCustomerSchema, insertJobSchema, admins, type Lead } from "@shared/schema";
 import { db } from "./db";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { requireAdminAuth, createAuthRouter } from "./auth";
 import { validateTwilioWebhook } from "./webhookAuth";
+
+// ==================== OWNER SMS ALERT ====================
+const OWNER_SMS_NUMBER = "+13159357169";
+const MOP_MAFIA_SMS_NUMBER = "+19844646019";
+
+async function sendOwnerSmsAlert(lead: Lead): Promise<void> {
+  try {
+    const allSettings = await storage.getAllSettings();
+    const enabled = allSettings["owner_sms_enabled"] !== "false"; // default ON
+    if (!enabled) {
+      console.log("[SMS] Owner alerts disabled");
+      return;
+    }
+
+    // Debounce: don't send if already sent within 5 minutes for this lead
+    if (lead.lastSmsAlertAt) {
+      const diffMs = Date.now() - new Date(lead.lastSmsAlertAt).getTime();
+      if (diffMs < 5 * 60 * 1000) {
+        console.log("[SMS] Debounce: skipping, already alerted within 5 min for lead", lead.id);
+        return;
+      }
+    }
+
+    const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+    const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+    const ownerPhone = allSettings["owner_phone"] || OWNER_SMS_NUMBER;
+
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+      console.warn("[SMS] Twilio credentials not set — skipping owner alert");
+      return;
+    }
+
+    const name = lead.firstName ? lead.firstName : "Someone";
+    const price = lead.calculatedPrice ? ` Quoted: $${lead.calculatedPrice}` : "";
+    const body = `🧹 New Mop Mafia lead!\n${name} — ${lead.phone}${price}\nCheck the CRM to follow up!`;
+
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+    const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${auth}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        To: ownerPhone,
+        From: MOP_MAFIA_SMS_NUMBER,
+        Body: body,
+      }),
+    });
+
+    if (response.ok) {
+      await storage.updateLead(lead.id, { lastSmsAlertAt: new Date() } as any);
+      console.log("[SMS] Owner alert sent to", ownerPhone);
+    } else {
+      const err = await response.text();
+      console.error("[SMS] Failed:", err);
+    }
+  } catch (err) {
+    console.error("[SMS] Unexpected error:", err);
+  }
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -448,6 +511,116 @@ export async function registerRoutes(
   // ---- IVR constants ----
   const OWNER_NUMBER = "+13159357169";
   const MOP_MAFIA_NUMBER = "+19844646019";
+
+  // ==================== SETTINGS API ====================
+  app.get("/api/settings", requireAdminAuth, async (req, res) => {
+    try {
+      const all = await storage.getAllSettings();
+      const defaults: Record<string, string> = {
+        owner_sms_enabled: "true",
+        lead_nurturing_enabled: "false",
+        form_submission_sms_enabled: "false",
+        owner_phone: OWNER_NUMBER,
+      };
+      res.json({ ...defaults, ...all });
+    } catch (error) {
+      console.error("Error fetching settings:", error);
+      res.status(500).json({ error: "Failed to fetch settings" });
+    }
+  });
+
+  app.put("/api/settings", requireAdminAuth, async (req, res) => {
+    try {
+      const updates = req.body as Record<string, string>;
+      for (const [key, value] of Object.entries(updates)) {
+        await storage.setSetting(key, String(value));
+      }
+      const all = await storage.getAllSettings();
+      res.json(all);
+    } catch (error) {
+      console.error("Error updating settings:", error);
+      res.status(500).json({ error: "Failed to update settings" });
+    }
+  });
+
+  // ==================== LEAD ACTIVITIES ====================
+  app.get("/api/leads/:id/activities", requireAdminAuth, async (req, res) => {
+    try {
+      const activities = await storage.getLeadActivities(req.params.id);
+      res.json(activities);
+    } catch (error) {
+      console.error("Error fetching lead activities:", error);
+      res.status(500).json({ error: "Failed to fetch activities" });
+    }
+  });
+
+  // ==================== CLICK-TO-CALL ====================
+  app.post("/api/calls/initiate", requireAdminAuth, async (req, res) => {
+    const { leadId } = req.body;
+    if (!leadId) return res.status(400).json({ error: "leadId required" });
+
+    try {
+      const lead = await storage.getLead(leadId);
+      if (!lead) return res.status(404).json({ error: "Lead not found" });
+
+      const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+      const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+
+      if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+        return res.status(503).json({ error: "Twilio not configured" });
+      }
+
+      const base = getBaseUrl(req);
+      const leadPhone = lead.phone;
+
+      const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+      const twilioRes = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls.json`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${auth}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({
+            To: OWNER_NUMBER,
+            From: MOP_MAFIA_NUMBER,
+            Url: `${base}/webhooks/twilio/click-to-call?leadPhone=${encodeURIComponent(leadPhone)}`,
+            StatusCallback: `${base}/webhooks/twilio/call-status`,
+            StatusCallbackMethod: "POST",
+          }),
+        }
+      );
+
+      if (!twilioRes.ok) {
+        const err = await twilioRes.text();
+        console.error("[Click-to-call] Twilio error:", err);
+        return res.status(500).json({ error: "Failed to initiate call" });
+      }
+
+      const callData = await twilioRes.json() as { sid: string };
+
+      const call = await storage.createCall({
+        callSid: callData.sid,
+        leadId: lead.id,
+        fromNumber: MOP_MAFIA_NUMBER,
+        toNumber: leadPhone,
+        direction: "outbound",
+        callStatus: "initiated",
+      });
+
+      await storage.createLeadActivity({
+        leadId: lead.id,
+        actionType: "call_initiated",
+        metadata: JSON.stringify({ callSid: callData.sid, toNumber: leadPhone, direction: "outbound-crm" }),
+      }).catch(console.error);
+
+      res.json({ success: true, callSid: callData.sid });
+    } catch (error) {
+      console.error("[Click-to-call] Error:", error);
+      res.status(500).json({ error: "Failed to initiate call" });
+    }
+  });
   const IVR_AUDIO_URL = "https://mop-mafia-ivr-audio.s3.us-east-2.amazonaws.com/mopmafiaivr.mp3";
 
   // Map IVR digit presses to human-readable intent for the whisper
@@ -760,6 +933,21 @@ export async function registerRoutes(
     message: z.string().optional(),
     leadType: z.enum(["residential", "commercial", "employment"]).optional(),
     source: z.string().optional(),
+    // Quote fields from landing page
+    frequency: z.string().optional(),
+    homeSize: z.string().optional(),
+    squareFootage: z.number().optional(),
+    addons: z.array(z.string()).optional(),
+    hasPets: z.boolean().optional(),
+    calculatedPrice: z.number().optional(),
+    // UTM tracking
+    utm_source: z.string().optional(),
+    utm_medium: z.string().optional(),
+    utm_campaign: z.string().optional(),
+    utm_content: z.string().optional(),
+    utm_term: z.string().optional(),
+    // CTA action
+    actionTaken: z.string().optional(),
   });
 
   app.post("/webhooks/landing-page/lead", async (req, res) => {
@@ -784,13 +972,26 @@ export async function registerRoutes(
         // Update existing lead with new info
         console.log("Updating existing lead:", lead.id);
         lead = await storage.updateLead(lead.id, {
-          firstName: data.firstName || lead.firstName,
-          lastName: data.lastName || lead.lastName,
-          email: data.email || lead.email,
+          firstName: data.firstName || lead.firstName || undefined,
+          lastName: data.lastName || lead.lastName || undefined,
+          email: data.email || lead.email || undefined,
           leadType: data.leadType || lead.leadType,
-          // Add message to notes if provided
           ...(data.message && { notes: data.message }),
-        });
+          frequency: data.frequency || lead.frequency || undefined,
+          homeSize: data.homeSize || lead.homeSize || undefined,
+          calculatedPrice: data.calculatedPrice ?? lead.calculatedPrice,
+          addons: data.addons ? JSON.stringify(data.addons) : lead.addons || undefined,
+          utmSource: data.utm_source || lead.utmSource || undefined,
+          utmMedium: data.utm_medium || lead.utmMedium || undefined,
+          utmCampaign: data.utm_campaign || lead.utmCampaign || undefined,
+          utmContent: data.utm_content || lead.utmContent || undefined,
+          utmTerm: data.utm_term || lead.utmTerm || undefined,
+          actionTaken: data.actionTaken || lead.actionTaken || undefined,
+        } as any);
+        // Send owner SMS alert if still a new lead
+        if (lead && lead.status === "new") {
+          sendOwnerSmsAlert(lead).catch(console.error);
+        }
       } else {
         // Create new lead
         console.log("Creating new lead from landing page");
@@ -802,7 +1003,29 @@ export async function registerRoutes(
           leadType: data.leadType || "residential",
           source: (data.source as any) || "form",
           status: "new",
-        });
+          frequency: data.frequency,
+          homeSize: data.homeSize,
+          calculatedPrice: data.calculatedPrice,
+          addons: data.addons ? JSON.stringify(data.addons) : undefined,
+          utmSource: data.utm_source,
+          utmMedium: data.utm_medium,
+          utmCampaign: data.utm_campaign,
+          utmContent: data.utm_content,
+          utmTerm: data.utm_term,
+          actionTaken: data.actionTaken,
+        } as any);
+
+        // Log activity
+        if (lead) {
+          await storage.createLeadActivity({
+            leadId: lead.id,
+            actionType: "lead_created",
+            metadata: JSON.stringify({ source: data.source || "form", calculatedPrice: data.calculatedPrice }),
+          }).catch(console.error);
+
+          // Send owner SMS alert (non-blocking)
+          sendOwnerSmsAlert(lead).catch(console.error);
+        }
       }
       
       console.log("Lead processed:", lead?.id);
@@ -819,6 +1042,47 @@ export async function registerRoutes(
       console.error("Error processing landing page webhook:", error);
       res.status(500).json({ error: "Failed to process lead" });
     }
+  });
+
+  // Landing page activity webhook
+  app.post("/webhooks/landing-page/activity", async (req, res) => {
+    const { lead_id, action_type, metadata } = req.body;
+    if (!lead_id || !action_type) {
+      return res.status(400).json({ error: "lead_id and action_type required" });
+    }
+    try {
+      await storage.createLeadActivity({
+        leadId: lead_id,
+        actionType: action_type,
+        metadata: metadata ? JSON.stringify(metadata) : undefined,
+      });
+
+      if (action_type === "cta_click_book_now" || action_type === "cta_click_call_to_book") {
+        await storage.updateLead(lead_id, {
+          actionTaken: action_type,
+          actionTakenAt: new Date(),
+        } as any);
+      }
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("[Activity webhook] Error:", err);
+      res.status(500).json({ error: "Failed to log activity" });
+    }
+  });
+
+  // Click-to-call TwiML webhook
+  app.post("/webhooks/twilio/click-to-call", (req, res) => {
+    const leadPhone = (req.query.leadPhone as string) || (req.body.leadPhone as string) || "";
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="alice">Connecting you to your Mop Mafia lead now.</Say>
+  <Dial callerId="${MOP_MAFIA_NUMBER}">
+    <Number>${leadPhone}</Number>
+  </Dial>
+</Response>`;
+    res.set("Content-Type", "text/xml");
+    res.send(twiml);
   });
 
   return httpServer;

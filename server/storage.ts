@@ -1,5 +1,6 @@
 import {
   leads, customers, calls, callEvents, conversations, messages, jobs, admins,
+  leadActivities, settings,
   type Lead, type InsertLead,
   type Customer, type InsertCustomer,
   type Call, type InsertCall,
@@ -8,6 +9,8 @@ import {
   type Message, type InsertMessage,
   type Job, type InsertJob,
   type Admin, type InsertAdmin,
+  type LeadActivity, type InsertLeadActivity,
+  type Setting,
   type LeadWithCustomer, type CustomerWithLead, type CallWithLead, 
   type ConversationWithMessages, type JobWithCustomer,
 } from "@shared/schema";
@@ -73,6 +76,15 @@ export interface IStorage {
   getAdminByEmail(email: string): Promise<Admin | undefined>;
   createAdmin(admin: InsertAdmin): Promise<Admin>;
   deleteAdmin(adminId: string): Promise<boolean>;
+
+  // Lead Activities
+  createLeadActivity(activity: InsertLeadActivity): Promise<LeadActivity>;
+  getLeadActivities(leadId: string): Promise<LeadActivity[]>;
+
+  // Settings
+  getSetting(key: string): Promise<string | null>;
+  setSetting(key: string, value: string): Promise<void>;
+  getAllSettings(): Promise<Record<string, string>>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -414,6 +426,41 @@ export class DatabaseStorage implements IStorage {
   async deleteAdmin(adminId: string): Promise<boolean> {
     await db.delete(admins).where(eq(admins.adminId, adminId));
     return true;
+  }
+
+  // Lead Activities
+  async createLeadActivity(activity: InsertLeadActivity): Promise<LeadActivity> {
+    const [row] = await db.insert(leadActivities).values(activity).returning();
+    return row;
+  }
+
+  async getLeadActivities(leadId: string): Promise<LeadActivity[]> {
+    return db
+      .select()
+      .from(leadActivities)
+      .where(eq(leadActivities.leadId, leadId))
+      .orderBy(leadActivities.createdAt);
+  }
+
+  // Settings
+  async getSetting(key: string): Promise<string | null> {
+    const [row] = await db.select().from(settings).where(eq(settings.key, key));
+    return row?.value ?? null;
+  }
+
+  async setSetting(key: string, value: string): Promise<void> {
+    await db
+      .insert(settings)
+      .values({ key, value, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: settings.key,
+        set: { value, updatedAt: new Date() },
+      });
+  }
+
+  async getAllSettings(): Promise<Record<string, string>> {
+    const rows = await db.select().from(settings);
+    return Object.fromEntries(rows.map((r) => [r.key, r.value]));
   }
 }
 

@@ -14,6 +14,7 @@ import Customers from "@/pages/customers";
 import Calls from "@/pages/calls";
 import Messages from "@/pages/messages";
 import Jobs from "@/pages/jobs";
+import Settings from "@/pages/settings";
 import Login from "@/pages/login";
 
 function ProtectedRoutes() {
@@ -25,6 +26,7 @@ function ProtectedRoutes() {
       <Route path="/calls" component={Calls} />
       <Route path="/messages" component={Messages} />
       <Route path="/jobs" component={Jobs} />
+      <Route path="/settings" component={Settings} />
       <Route component={NotFound} />
     </Switch>
   );

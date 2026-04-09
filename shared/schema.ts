@@ -29,6 +29,19 @@ export const leads = pgTable("leads", {
   status: leadStatusEnum("status").default("new"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  notes: text("notes"),
+  frequency: text("frequency"),
+  homeSize: text("home_size"),
+  calculatedPrice: integer("calculated_price"),
+  addons: text("addons"),
+  utmSource: text("utm_source"),
+  utmMedium: text("utm_medium"),
+  utmCampaign: text("utm_campaign"),
+  utmContent: text("utm_content"),
+  utmTerm: text("utm_term"),
+  actionTaken: text("action_taken"),
+  actionTakenAt: timestamp("action_taken_at"),
+  lastSmsAlertAt: timestamp("last_sms_alert_at"),
 });
 
 export const leadsRelations = relations(leads, ({ one, many }) => ({
@@ -38,7 +51,28 @@ export const leadsRelations = relations(leads, ({ one, many }) => ({
   }),
   calls: many(calls),
   conversations: many(conversations),
+  leadActivities: many(leadActivities),
 }));
+
+// Lead Activities table
+export const leadActivities = pgTable("lead_activities", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  leadId: varchar("lead_id").references(() => leads.id, { onDelete: "cascade" }).notNull(),
+  actionType: text("action_type").notNull(),
+  metadata: text("metadata"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const leadActivitiesRelations = relations(leadActivities, ({ one }) => ({
+  lead: one(leads, { fields: [leadActivities.leadId], references: [leads.id] }),
+}));
+
+// Settings table
+export const settings = pgTable("settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
 
 // Customers table
 export const customers = pgTable("customers", {
@@ -200,6 +234,9 @@ export const insertAdminSchema = createInsertSchema(admins).omit({
   createdAt: true,
 });
 
+export const insertLeadActivitySchema = createInsertSchema(leadActivities).omit({ id: true, createdAt: true });
+export const insertSettingsSchema = createInsertSchema(settings).omit({ updatedAt: true });
+
 // Types
 export type Lead = typeof leads.$inferSelect;
 export type InsertLead = z.infer<typeof insertLeadSchema>;
@@ -217,6 +254,9 @@ export type Job = typeof jobs.$inferSelect;
 export type InsertJob = z.infer<typeof insertJobSchema>;
 export type Admin = typeof admins.$inferSelect;
 export type InsertAdmin = z.infer<typeof insertAdminSchema>;
+export type LeadActivity = typeof leadActivities.$inferSelect;
+export type InsertLeadActivity = z.infer<typeof insertLeadActivitySchema>;
+export type Setting = typeof settings.$inferSelect;
 
 // Extended types with relations
 export type LeadWithCustomer = Lead & { customer?: Customer | null };

@@ -7,6 +7,7 @@ import {
   MessageSquare,
   Calendar,
   LogOut,
+  Settings2,
 } from "lucide-react";
 import logoUrl from "@assets/Mop_Mafia_Logo_PNG_1767503227218.png";
 import {
@@ -31,6 +32,7 @@ const navItems = [
   { title: "Calls", url: "/calls", icon: Phone },
   { title: "Messages", url: "/messages", icon: MessageSquare },
   { title: "Jobs", url: "/jobs", icon: Calendar },
+  { title: "Settings", url: "/settings", icon: Settings2 },
 ];
 
 export function AppSidebar() {
