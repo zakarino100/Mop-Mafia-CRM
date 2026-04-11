@@ -379,7 +379,10 @@ export class DatabaseStorage implements IStorage {
       .from(customers);
 
     const [callStats] = await db
-      .select({ total: sql<number>`count(*)::int` })
+      .select({ 
+        total: sql<number>`count(*)::int`,
+        spam: sql<number>`count(*) filter (where ${calls.isSpam} = 1 or ${calls.callStatus} = 'spam')::int`
+      })
       .from(calls);
 
     const [jobStats] = await db
@@ -394,6 +397,7 @@ export class DatabaseStorage implements IStorage {
       newLeads: leadStats?.new || 0,
       totalCustomers: customerStats?.total || 0,
       totalCalls: callStats?.total || 0,
+      spamCalls: callStats?.spam || 0,
       totalJobs: jobStats?.total || 0,
       scheduledJobs: jobStats?.scheduled || 0,
     };

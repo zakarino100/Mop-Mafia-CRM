@@ -12,6 +12,47 @@ import { validateTwilioWebhook } from "./webhookAuth";
 const OWNER_SMS_NUMBER = "+13159357169";
 const MOP_MAFIA_SMS_NUMBER = "+19844646019";
 
+function normalizePhoneForSpamCheck(phone?: string | null): string {
+  return (phone || "").replace(/\D/g, "");
+}
+
+function getSpamScore(params: {
+  from: string;
+  to: string;
+  direction?: string;
+  status?: string;
+  durationSeconds?: number;
+  ivrOption?: string | null;
+}): number {
+  const from = normalizePhoneForSpamCheck(params.from);
+  const to = normalizePhoneForSpamCheck(params.to);
+  const duration = params.durationSeconds ?? 0;
+  const status = (params.status || "").toLowerCase();
+  const ivrOption = params.ivrOption ?? null;
+
+  let score = 0;
+
+  if (params.direction === "inbound") score += 1;
+  if (!ivrOption || ivrOption === "timeout" || ivrOption === "0") score += 2;
+  if (duration < 8) score += 2;
+  if (["canceled", "failed", "busy", "no-answer"].includes(status)) score += 2;
+  if (from.length < 10) score += 3;
+  if (from === to) score += 3;
+
+  return score;
+}
+
+function isSpamCall(params: {
+  from: string;
+  to: string;
+  direction?: string;
+  status?: string;
+  durationSeconds?: number;
+  ivrOption?: string | null;
+}): boolean {
+  return getSpamScore(params) >= 5;
+}
+
 async function sendOwnerSmsAlert(lead: Lead): Promise<void> {
   try {
     const allSettings = await storage.getAllSettings();
@@ -775,7 +816,7 @@ export async function registerRoutes(
       console.log("Existing call lookup result:", existingCall ? existingCall.callSid : "not found");
       
       // Map Twilio status to our enum
-      const statusMap: Record<string, "initiated" | "ringing" | "in-progress" | "completed" | "busy" | "failed" | "no-answer" | "canceled"> = {
+      const statusMap: Record<string, "initiated" | "ringing" | "in-progress" | "completed" | "busy" | "failed" | "no-answer" | "canceled" | "spam"> = {
         "queued": "initiated",
         "initiated": "initiated",
         "ringing": "ringing",
@@ -787,10 +828,30 @@ export async function registerRoutes(
         "canceled": "canceled",
       };
       
-      const mappedStatus = statusMap[CallStatus?.toLowerCase()] || "initiated";
+      let mappedStatus = statusMap[CallStatus?.toLowerCase()] || "initiated";
 
       // Terminal statuses set by dial-complete that should NOT be overwritten by a generic "completed"
-      const specificTerminalStatuses = new Set(["no-answer", "busy", "failed", "canceled"]);
+      const specificTerminalStatuses = new Set(["no-answer", "busy", "failed", "canceled", "spam"]);
+      const spamScore = getSpamScore({
+        from: From,
+        to: To,
+        direction: Direction === "inbound" ? "inbound" : "outbound",
+        status: mappedStatus,
+        durationSeconds: CallDuration ? parseInt(CallDuration, 10) : undefined,
+        ivrOption: existingCall?.ivrOption ?? null,
+      });
+      const spamDetected = isSpamCall({
+        from: From,
+        to: To,
+        direction: Direction === "inbound" ? "inbound" : "outbound",
+        status: mappedStatus,
+        durationSeconds: CallDuration ? parseInt(CallDuration, 10) : undefined,
+        ivrOption: existingCall?.ivrOption ?? null,
+      });
+
+      if (spamDetected && ["busy", "failed", "no-answer", "canceled", "initiated"].includes(mappedStatus)) {
+        mappedStatus = "spam";
+      }
 
       if (existingCall) {
         // Update existing call snapshot, but don't overwrite a specific terminal status with "completed"
@@ -806,6 +867,8 @@ export async function registerRoutes(
             callStatus: mappedStatus,
             durationSeconds: CallDuration ? parseInt(CallDuration, 10) : undefined,
             endedAt: isTerminal ? new Date() : undefined,
+            spamScore,
+            isSpam: spamDetected ? 1 : 0,
             ...(hungUpBy ? { hungUpBy } : {}),
           });
           console.log("Call updated successfully", hungUpBy ? `hungUpBy: ${hungUpBy}` : "");
@@ -823,6 +886,8 @@ export async function registerRoutes(
             : "inbound",
           callStatus: mappedStatus,
           durationSeconds: CallDuration ? parseInt(CallDuration, 10) : undefined,
+          spamScore,
+          isSpam: spamDetected ? 1 : 0,
         });
         console.log("Call created successfully:", newCall.callSid);
       }
@@ -930,6 +995,8 @@ export async function registerRoutes(
     lastName: z.string().optional(),
     phone: z.string().min(1, "Phone number is required"),
     email: z.string().email().optional().or(z.literal("")),
+    address: z.string().optional(),
+    placeId: z.string().optional(),
     message: z.string().optional(),
     leadType: z.enum(["residential", "commercial", "employment"]).optional(),
     source: z.string().optional(),
@@ -976,7 +1043,11 @@ export async function registerRoutes(
           lastName: data.lastName || lead.lastName || undefined,
           email: data.email || lead.email || undefined,
           leadType: data.leadType || lead.leadType,
-          ...(data.message && { notes: data.message }),
+          notes: [
+            data.message || lead.notes || undefined,
+            data.address ? `Address: ${data.address}` : undefined,
+            data.placeId ? `Place ID: ${data.placeId}` : undefined,
+          ].filter(Boolean).join("\n") || undefined,
           frequency: data.frequency || lead.frequency || undefined,
           homeSize: data.homeSize || lead.homeSize || undefined,
           calculatedPrice: data.calculatedPrice ?? lead.calculatedPrice,
@@ -1013,6 +1084,7 @@ export async function registerRoutes(
           utmContent: data.utm_content,
           utmTerm: data.utm_term,
           actionTaken: data.actionTaken,
+          notes: [data.message, data.address ? `Address: ${data.address}` : undefined, data.placeId ? `Place ID: ${data.placeId}` : undefined].filter(Boolean).join("\n") || undefined,
         } as any);
 
         // Log activity

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Users, UserCheck, Phone, Calendar, TrendingUp, MessageSquare } from "lucide-react";
+import { Users, UserCheck, Phone, Calendar, TrendingUp, MessageSquare, AlertTriangle } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { StatCard } from "@/components/stat-card";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,6 +12,7 @@ interface DashboardStats {
   newLeads: number;
   totalCustomers: number;
   totalCalls: number;
+  spamCalls: number;
   totalJobs: number;
   scheduledJobs: number;
 }
@@ -67,6 +68,13 @@ export default function Dashboard() {
           value={stats?.totalCalls ?? 0}
           icon={Phone}
           description="All time calls"
+          isLoading={statsLoading}
+        />
+        <StatCard
+          title="Spam Calls"
+          value={stats?.spamCalls ?? 0}
+          icon={AlertTriangle}
+          description="Flagged as likely spam"
           isLoading={statsLoading}
         />
         <StatCard

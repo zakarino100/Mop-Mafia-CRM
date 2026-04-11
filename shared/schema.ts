@@ -8,7 +8,7 @@ export const leadTypeEnum = pgEnum("lead_type", ["residential", "commercial", "e
 export const leadSourceEnum = pgEnum("lead_source", ["call", "sms", "form", "ad", "referral"]);
 export const leadStatusEnum = pgEnum("lead_status", ["new", "contacted", "booked", "active", "completed", "lost"]);
 export const callDirectionEnum = pgEnum("call_direction", ["inbound", "outbound"]);
-export const callStatusEnum = pgEnum("call_status", ["initiated", "ringing", "in-progress", "completed", "busy", "failed", "no-answer", "canceled"]);
+export const callStatusEnum = pgEnum("call_status", ["initiated", "ringing", "in-progress", "completed", "busy", "failed", "no-answer", "canceled", "spam"]);
 export const hungUpByEnum = pgEnum("hung_up_by", ["caller", "owner"]);
 export const eventTypeEnum = pgEnum("event_type", ["initiated", "ringing", "answered", "completed"]);
 export const channelEnum = pgEnum("channel", ["sms", "whatsapp", "email"]);
@@ -104,6 +104,8 @@ export const calls = pgTable("calls", {
   durationSeconds: integer("duration_seconds"),
   hungUpBy: hungUpByEnum("hung_up_by"),
   ivrOption: text("ivr_option"), // digit pressed ("1"-"4"), "timeout" = no input, null = pre-IVR
+  spamScore: integer("spam_score").default(0),
+  isSpam: integer("is_spam").default(0),
   startedAt: timestamp("started_at").defaultNow().notNull(),
   endedAt: timestamp("ended_at"),
 });
